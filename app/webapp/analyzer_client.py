@@ -45,14 +45,19 @@ class AnalyzerClient:
             return r.json()
 
     def reader_switch(self, *, switch_id: str, version: int, base_version: int,
-                      reader_schema: Dict[str, Any], writer_schema: Dict[str, Any]
+                      reader_schema: Dict[str, Any],
+                      writer_schemas: Optional[List[Dict[str, Any]]] = None,
+                      writer_schema: Optional[Dict[str, Any]] = None
                       ) -> Dict[str, Any]:
+        schemas = list(writer_schemas or [])
+        if writer_schema is not None and writer_schema not in schemas:
+            schemas.append(writer_schema)
         body = {
             "switch_id": switch_id,
             "version": version,
             "base_version": base_version,
             "reader_schema": reader_schema,
-            "writer_schema": writer_schema,
+            "writer_schemas": schemas,
         }
         with self._client() as c:
             r = c.post("/reader/switch", json=body)

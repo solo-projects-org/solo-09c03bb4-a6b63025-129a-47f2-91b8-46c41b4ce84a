@@ -9,11 +9,13 @@ services:
       - "8001:8001"
     volumes:
       - analyzer_a_data:/data
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8001/health')"]
       interval: 5s
       timeout: 3s
       retries: 10
+      start_period: 5s
 
   analyzer-b:
     build: .
@@ -25,11 +27,13 @@ services:
       - "8002:8002"
     volumes:
       - analyzer_b_data:/data
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8002/health')"]
       interval: 5s
       timeout: 3s
       retries: 10
+      start_period: 5s
 
   webapp:
     build: .
@@ -43,11 +47,18 @@ services:
       - "8000:8000"
     volumes:
       - webapp_data:/data
+    restart: unless-stopped
     depends_on:
       analyzer-a:
         condition: service_healthy
       analyzer-b:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
 
 volumes:
   analyzer_a_data:

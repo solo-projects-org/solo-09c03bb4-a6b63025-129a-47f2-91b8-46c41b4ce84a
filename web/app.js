@@ -48,6 +48,11 @@ async function refresh() {
 
 function renderStates(s) {
   const w = s.effective_writer;
+  const pending = [...s.writer_switches, ...s.reader_switches]
+    .filter((x) => x.status === "pending").length;
+  $("pending-summary").innerHTML = pending
+    ? `<span class="badge pending">${pending} 个切换待确认 · 兼容事件仍可入仓</span>`
+    : `<span class="badge ok">无待确认切换</span>`;
   $("writer-state").innerHTML =
     `<div><b>v${w.version}</b> <span class="pill">fp ${esc(w.fingerprint.slice(0, 10))}</span></div>
      <pre>${esc(pretty(w.schema))}</pre>`;
@@ -84,9 +89,12 @@ function switchRow(sw, isReader) {
 }
 
 function renderSwitches(s) {
-  $("writer-switches").innerHTML =
-    s.writer_switches.map((x) => switchRow(x, false)).join("") ||
-    "<div class='hint'>暂无切换记录</div>";
+  const inflight = (s.in_flight_ingests || []).map((l) =>
+    `<div class="meta">在途入仓租约 ${esc(l.lease_id)} · 写入 v${l.writer_version}
+      · fp ${esc(l.writer_fp.slice(0, 8))}（升级守卫会覆盖该格式）</div>`).join("");
+  $("writer-switches").innerHTML = inflight +
+    (s.writer_switches.map((x) => switchRow(x, false)).join("") ||
+    "<div class='hint'>暂无切换记录</div>");
   $("reader-switches").innerHTML =
     s.reader_switches.map((x) => switchRow(x, true)).join("") ||
     "<div class='hint'>暂无切换记录</div>";
@@ -255,14 +263,22 @@ $("btn-sim").onclick = async () => {
 };
 
 // ---------------- 初始化：填入示例 schema ----------------
+function copy(x) { return JSON.parse(JSON.stringify(x)); }
+
 async function initForms() {
-  const base = await api("/api/default-schema");
-  const v2 = structuredClone(base);
+  // Prefill from the current effective write format, then add optional
+  // defaulted fields.  A reader switch must be able to read *every* format
+  // that could still become an event (current writer, retained events,
+  // in-flight ingestions and pending write switches), so starting from the
+  // effective schema is the safe default.
+  const st = await api("/api/status");
+  const current = st.effective_writer.schema;
+  const v2 = copy(current);
   v2.fields.push({ name: "instrument_id", type: "string", default: "UNKNOWN" });
   v2.fields.push({ name: "quality_flag", type: ["null", "string"], default: null });
   $("writer-schema").value = pretty(v2);
 
-  const readerV2 = structuredClone(base);
+  const readerV2 = copy(current);
   readerV2.fields.push({ name: "temperature", type: "double", default: 0.0 });
   $("reader-schema").value = pretty(readerV2);
 }

@@ -30,6 +30,7 @@
         <div id="reader-b" class="state">加载中…</div>
       </div>
     </div>
+    <div id="pending-summary"></div>
     <h3>历史写入格式版本</h3>
     <div id="schema-history"></div>
   </section>
@@ -91,7 +92,7 @@
       </div>
       <div>
         <h3>切换某服务读取格式</h3>
-        <p class="hint">须能读当前写入格式及全部留存事件的原格式，否则说明字段路径且不改格式。</p>
+        <p class="hint">须能读当前写入格式、全部留存事件、在途入仓与待确认写切换的原格式，否则说明字段路径且不改格式。</p>
         <label>目标分析服务</label>
         <select id="reader-target">
           <option value="analyzer-a">analyzer-a</option>
@@ -146,7 +147,8 @@
     </div>
     <button id="btn-sim" class="warn">应用故障注入</button>
     <span id="sim-msg" class="inline-msg"></span>
-    <div class="hint">“丢回执”为一次性开关：仅下一次调用丢失；未确认前状态保持 pending，可重启或点对账核实。</div>
+    <div class="hint">“丢回执”为一次性开关：仅下一次调用丢失；未确认前状态保持 pending，可重启或点对账核实。
+写切换在确认前不会释放写格式；读切换守卫同时覆盖当前/留存/在途/待确认切换的全部可能写入格式。</div>
   </section>
 </main>
 

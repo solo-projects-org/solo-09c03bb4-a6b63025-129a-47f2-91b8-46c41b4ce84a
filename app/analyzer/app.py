@@ -23,12 +23,12 @@ import json
 import os
 import time
 from contextlib import asynccontextmanager
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from ..avro_codec import decode, parse_schema, roundtrip_check
+from ..avro_codec import decode, fingerprint, parse_schema, roundtrip_check
 from ..avro_compat import explain
 from . import db
 
@@ -40,7 +40,11 @@ class ReaderSwitchReq(BaseModel):
     version: int = Field(..., gt=0)
     base_version: int = Field(..., ge=0)
     reader_schema: Dict[str, Any]
-    writer_schema: Dict[str, Any]
+    # Every writer format that may still be observed: current, retained
+    # events, in-flight ingestions and still-unconfirmed writer switches.
+    writer_schemas: List[Dict[str, Any]] = Field(default_factory=list)
+    # Retained for backwards compatibility with older platforms.
+    writer_schema: Optional[Dict[str, Any]] = None
 
 
 class WriterCheckReq(BaseModel):
@@ -74,10 +78,12 @@ def create_app(analyzer_id: str, db_path: str) -> FastAPI:
 
     def _state() -> Dict[str, Any]:
         row = db.get_state(db_path)
+        reader_schema = json.loads(row["reader_schema_json"])
         return {
             "analyzer_id": analyzer_id,
             "effective_version": row["version"],
-            "reader_schema": json.loads(row["reader_schema_json"]),
+            "reader_schema": reader_schema,
+            "reader_fp": row["reader_fp"] or fingerprint(reader_schema),
             "updated_at": row["updated_at"],
             "last_switch_id": row["last_switch_id"],
         }
@@ -118,7 +124,9 @@ def create_app(analyzer_id: str, db_path: str) -> FastAPI:
             "compatible": err is None,
             "error": err,
         }
-        return _maybe_drop(sim, "switch", payload)
+        # Read-only proof: never consumes the one-shot "lost switch response"
+        # fault, which must apply to the next actual reader switch.
+        return payload
 
     @app.post("/reader/switch")
     def reader_switch(req: ReaderSwitchReq):
@@ -128,56 +136,107 @@ def create_app(analyzer_id: str, db_path: str) -> FastAPI:
 
         row = db.get_state(db_path)
         current_version = row["version"]
+        current_fp = row["reader_fp"] or fingerprint(
+            json.loads(row["reader_schema_json"]))
+        requested_fp = fingerprint(req.reader_schema)
 
         # Idempotent replay of the exact same switch: answer from state.
         if (row["last_switch_id"] == req.switch_id
                 and current_version == req.version):
+            if current_fp != requested_fp:
+                return _maybe_drop(sim, "switch", {
+                    "status": "conflict",
+                    "analyzer_id": analyzer_id,
+                    "switch_id": req.switch_id,
+                    "effective_version": current_version,
+                    "reason": (f"switch {req.switch_id} was already applied "
+                               "with a different reader schema"),
+                })
             result = {
                 "status": "already_applied",
                 "analyzer_id": analyzer_id,
                 "switch_id": req.switch_id,
                 "effective_version": current_version,
                 "reader_version": current_version,
+                "reader_fp": current_fp,
             }
             return _maybe_drop(sim, "switch", result)
 
-        # Fence: a switch based on an outdated base must never clobber a newer.
-        if current_version != req.base_version:
+        # Fence: a late / replayed / not-newer version must never clobber the
+        # effective reader.  Version regression is rejected explicitly.
+        if req.version <= current_version or current_version != req.base_version:
+            reason = (
+                f"requested version {req.version} is not newer than effective "
+                f"version {current_version}; late switch rejected"
+                if req.version <= current_version else
+                f"base_version {req.base_version} does not match effective "
+                f"version {current_version}; late switch rejected")
             result = {
                 "status": "stale",
                 "analyzer_id": analyzer_id,
                 "effective_version": current_version,
                 "requested_version": req.version,
-                "reason": (f"base_version {req.base_version} does not match "
-                           f"effective version {current_version}; late switch "
-                           "rejected"),
+                "reason": reason,
             }
             return _maybe_drop(sim, "switch", result)
 
-        # Local guard: the analyzer validates schemas and compatibility itself.
+        # Local guard: the analyzer validates schemas and compatibility itself,
+        # against *every* writer format the platform may still hand over.
+        writer_schemas = list(req.writer_schemas)
+        if req.writer_schema is not None and req.writer_schema not in writer_schemas:
+            writer_schemas.append(req.writer_schema)
+        if not writer_schemas:
+            raise HTTPException(400, "writer_schemas is required")
         try:
             parse_schema(req.reader_schema)
-            parse_schema(req.writer_schema)
+            for wschema in writer_schemas:
+                parse_schema(wschema)
         except Exception as exc:
             raise HTTPException(400, f"invalid schema: {exc}")
-        err = explain(req.reader_schema, req.writer_schema)
-        if err:
-            raise HTTPException(422, {"status": "incompatible", "error": err})
+        for index, wschema in enumerate(writer_schemas):
+            err = explain(req.reader_schema, wschema)
+            if err:
+                raise HTTPException(422, {
+                    "status": "incompatible", "error": err,
+                    "writer_index": index,
+                    "writer_fp": fingerprint(wschema),
+                })
+            # Prove a real binary round-trip, not just static reasoning.
+            rt_err = roundtrip_check(req.reader_schema, wschema)
+            if rt_err:
+                raise HTTPException(422, {
+                    "status": "incompatible", "error": rt_err,
+                    "writer_index": index,
+                    "writer_fp": fingerprint(wschema),
+                })
 
-        db.apply_switch(
+        applied = db.apply_switch(
             db_path,
             switch_id=req.switch_id,
             version=req.version,
             base_version=req.base_version,
             reader_schema=req.reader_schema,
-            writer_schema=req.writer_schema,
+            writer_schemas=writer_schemas,
         )
+        status = applied.get("status")
+        if status not in ("applied", "already_applied"):
+            result = {
+                "status": status,
+                "analyzer_id": analyzer_id,
+                "switch_id": req.switch_id,
+                "effective_version": applied.get("effective_version",
+                                                 current_version),
+                "requested_version": req.version,
+                "reason": applied.get("reason"),
+            }
+            return _maybe_drop(sim, "switch", result)
         result = {
-            "status": "applied",
+            "status": status,
             "analyzer_id": analyzer_id,
             "switch_id": req.switch_id,
-            "effective_version": req.version,
-            "reader_version": req.version,
+            "effective_version": applied["effective_version"],
+            "reader_version": applied["effective_version"],
+            "reader_fp": applied.get("reader_fp", requested_fp),
         }
         return _maybe_drop(sim, "switch", result)
 

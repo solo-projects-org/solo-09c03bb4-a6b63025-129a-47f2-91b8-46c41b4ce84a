@@ -399,5 +399,24 @@ class TestFullFlow(unittest.TestCase):
         self.assertIsInstance(d["datum"]["tags"][0], int)
 
 
+    def test_14_pending_reader_is_not_overwritten_by_a_second_reader(self):
+        # Two reader upgrades for the same analyzer must be serialized: the
+        # second is refused while the first is unconfirmed.
+        analyzer_db.set_sim(self.h.a_db, 0, True, False)
+        first = self.web.post("/api/switches/reader", json={
+            "analyzer_id": "analyzer-a",
+            "schema": reader_v2_with_default()})
+        self.assertEqual(first.json()["switch"]["status"], "pending")
+        second = self.web.post("/api/switches/reader", json={
+            "analyzer_id": "analyzer-a", "schema": V1})
+        self.assertEqual(second.status_code, 409)
+        self.assertIn("unconfirmed reader switch", second.json()["error"])
+        self.web.post("/api/reconcile")
+        st = self.web.get("/api/status").json()
+        self.assertEqual(st["analyzers"]["analyzer-a"]["effective_version"], 2)
+        self.assertTrue(all(s["status"] == "confirmed"
+                            for s in st["reader_switches"]))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

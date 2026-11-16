@@ -65,10 +65,14 @@ async def lifespan(app: FastAPI):
         service.reconcile_all()
     except Exception as exc:
         print(f"[startup] initial reconciliation failed: {exc}", flush=True)
+    _bg_stop.clear()
     t = threading.Thread(target=_bg_reconcile, name="reconciler", daemon=True)
     t.start()
-    yield
-    _bg_stop.set()
+    try:
+        yield
+    finally:
+        _bg_stop.set()
+        t.join(timeout=5)
 
 
 app = FastAPI(title="Avro 仪器事件格式升级平台", lifespan=lifespan)
@@ -137,6 +141,11 @@ app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 @app.get("/api/status")
 def get_status():
     return service.status()
+
+
+@app.get("/api/health")
+def health():
+    return {"status": "ok"}
 
 
 @app.get("/api/default-schema")

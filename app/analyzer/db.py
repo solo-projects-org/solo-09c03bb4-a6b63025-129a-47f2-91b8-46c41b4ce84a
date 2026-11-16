@@ -1,13 +1,20 @@
-"""Persistence layer for one analyzer service (its own SQLite database)."""
+"""Persistence layer for one analyzer service (its own SQLite database).
+
+Every reader switch is applied inside a single ``BEGIN IMMEDIATE`` transaction
+that re-reads the effective state, checks the idempotency log, applies the
+fence and performs the mutation atomically.  A late/duplicated request can
+therefore never overwrite a newer effective reader, and a replayed request can
+never be confused with a *different* switch that happens to reuse its id.
+"""
 from __future__ import annotations
 
 import json
 import sqlite3
 import time
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
-from ..db_common import get_conn
-from ..avro_codec import DEFAULT_SCHEMA_V1
+from ..avro_codec import DEFAULT_SCHEMA_V1, fingerprint
+from ..db_common import get_conn, transaction
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS reader_state (
@@ -15,6 +22,7 @@ CREATE TABLE IF NOT EXISTS reader_state (
     version             INTEGER NOT NULL,
     last_switch_id      TEXT,
     reader_schema_json  TEXT NOT NULL,
+    reader_fp           TEXT,
     updated_at          TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS switch_log (
@@ -22,7 +30,9 @@ CREATE TABLE IF NOT EXISTS switch_log (
     version             INTEGER NOT NULL,
     base_version        INTEGER NOT NULL,
     reader_schema_json  TEXT NOT NULL,
+    reader_fp           TEXT,
     writer_schema_json  TEXT NOT NULL,
+    writer_schemas_json TEXT,
     applied_at          TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sim_config (
@@ -38,12 +48,26 @@ def init(db_path: str) -> None:
     conn = get_conn(db_path)
     try:
         conn.executescript(_DDL)
+        _migrate(conn)
         now = _now()
+        fp = fingerprint(DEFAULT_SCHEMA_V1)
         conn.execute(
             "INSERT OR IGNORE INTO reader_state(id, version, last_switch_id, "
-            "reader_schema_json, updated_at) VALUES (1, 1, NULL, ?, ?)",
-            (json.dumps(DEFAULT_SCHEMA_V1), now),
+            "reader_schema_json, reader_fp, updated_at) VALUES (1, 1, NULL, ?, ?, ?)",
+            (json.dumps(DEFAULT_SCHEMA_V1), fp, now),
         )
+        # Backfill the fingerprint for databases created before it existed,
+        # deriving it from the *stored* reader schema (which may not be v1).
+        row = conn.execute("SELECT reader_schema_json FROM reader_state "
+                           "WHERE id = 1 AND (reader_fp IS NULL OR reader_fp = '')"
+                           ).fetchone()
+        if row is not None:
+            try:
+                existing_fp = fingerprint(json.loads(row["reader_schema_json"]))
+            except Exception:
+                existing_fp = fp
+            conn.execute("UPDATE reader_state SET reader_fp = ? WHERE id = 1",
+                         (existing_fp,))
         conn.execute(
             "INSERT OR IGNORE INTO sim_config(id, delay_ms, drop_switch_response, "
             "drop_decode_response) VALUES (1, 0, 0, 0)"
@@ -51,6 +75,30 @@ def init(db_path: str) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set:
+    return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    state_cols = _columns(conn, "reader_state")
+    if "reader_fp" not in state_cols:
+        conn.execute("ALTER TABLE reader_state ADD COLUMN reader_fp TEXT")
+    log_cols = _columns(conn, "switch_log")
+    if "reader_fp" not in log_cols:
+        conn.execute("ALTER TABLE switch_log ADD COLUMN reader_fp TEXT")
+    if "writer_schemas_json" not in log_cols:
+        conn.execute("ALTER TABLE switch_log ADD COLUMN writer_schemas_json TEXT")
+    # Backfill fingerprints for legacy switch-log rows.
+    for row in conn.execute("SELECT switch_id, reader_schema_json FROM switch_log "
+                            "WHERE reader_fp IS NULL OR reader_fp = ''").fetchall():
+        try:
+            schema = json.loads(row["reader_schema_json"])
+        except Exception:
+            continue
+        conn.execute("UPDATE switch_log SET reader_fp = ? WHERE switch_id = ?",
+                     (fingerprint(schema), row["switch_id"]))
 
 
 def _now() -> str:
@@ -65,24 +113,90 @@ def get_state(db_path: str) -> sqlite3.Row:
         conn.close()
 
 
-def apply_switch(db_path: str, *, switch_id: str, version: int, base_version: int,
-                 reader_schema: Dict[str, Any], writer_schema: Dict[str, Any]) -> None:
-    """Durably install a new reader schema atomically with its audit row."""
+def get_switch_log(db_path: str, switch_id: str) -> Optional[sqlite3.Row]:
     conn = get_conn(db_path)
     try:
-        with conn:
+        return conn.execute("SELECT * FROM switch_log WHERE switch_id = ?",
+                            (switch_id,)).fetchone()
+    finally:
+        conn.close()
+
+
+def apply_switch(db_path: str, *, switch_id: str, version: int, base_version: int,
+                 reader_schema: Dict[str, Any],
+                 writer_schemas: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Atomically apply a fenced, idempotent reader switch.
+
+    Returns ``{"status": applied|already_applied|stale|conflict, ...}``.
+    A request whose ``switch_id`` is already logged with a different payload is
+    a conflict; a request whose version is not newer than the effective one is
+    stale, so an old switch can never roll the reader back.
+    """
+    reader_fp = fingerprint(reader_schema)
+    writer_schemas_json = json.dumps(writer_schemas)
+    conn = get_conn(db_path)
+    try:
+        with transaction(conn, immediate=True):
+            state = conn.execute(
+                "SELECT * FROM reader_state WHERE id = 1").fetchone()
+            current_version = state["version"]
+            logged = conn.execute(
+                "SELECT * FROM switch_log WHERE switch_id = ?", (switch_id,)
+            ).fetchone()
+
+            if logged is not None:
+                logged_fp = logged["reader_fp"] or fingerprint(
+                    json.loads(logged["reader_schema_json"]))
+                if logged["version"] != version or logged_fp != reader_fp:
+                    return {
+                        "status": "conflict",
+                        "effective_version": current_version,
+                        "reason": (f"switch_id {switch_id} was already logged "
+                                   f"with a different version/schema"),
+                    }
+                return {
+                    "status": "already_applied",
+                    "effective_version": current_version,
+                    "switch_version": version,
+                    "reader_fp": logged_fp,
+                }
+
+            # Late or duplicated switch: never overwrite a newer reader.
+            if version <= current_version:
+                return {
+                    "status": "stale",
+                    "effective_version": current_version,
+                    "requested_version": version,
+                    "reason": (f"requested version {version} is not newer than "
+                               f"effective version {current_version}; late "
+                               "switch rejected"),
+                }
+            if current_version != base_version:
+                return {
+                    "status": "stale",
+                    "effective_version": current_version,
+                    "requested_version": version,
+                    "reason": (f"base_version {base_version} does not match "
+                               f"effective version {current_version}; late "
+                               "switch rejected"),
+                }
+
             conn.execute(
                 "INSERT INTO switch_log(switch_id, version, base_version, "
-                "reader_schema_json, writer_schema_json, applied_at) "
-                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(switch_id) DO NOTHING",
-                (switch_id, version, base_version,
-                 json.dumps(reader_schema), json.dumps(writer_schema), _now()),
+                "reader_schema_json, reader_fp, writer_schema_json, "
+                "writer_schemas_json, applied_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (switch_id, version, base_version, json.dumps(reader_schema),
+                 reader_fp,
+                 json.dumps(writer_schemas[0]) if writer_schemas else "null",
+                 writer_schemas_json, _now()),
             )
             conn.execute(
                 "UPDATE reader_state SET version = ?, last_switch_id = ?, "
-                "reader_schema_json = ?, updated_at = ? WHERE id = 1",
-                (version, switch_id, json.dumps(reader_schema), _now()),
+                "reader_schema_json = ?, reader_fp = ?, updated_at = ? WHERE id = 1",
+                (version, switch_id, json.dumps(reader_schema), reader_fp, _now()),
             )
+            return {"status": "applied", "effective_version": version,
+                    "reader_fp": reader_fp}
     finally:
         conn.close()
 
