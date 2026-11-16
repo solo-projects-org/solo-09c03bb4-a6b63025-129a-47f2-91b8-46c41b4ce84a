@@ -1,0 +1,9 @@
+.pylibs/
+.venv/
+__pycache__/
+*.pyc
+data/
+.git/
+.gitignore
+tests/
+*.db

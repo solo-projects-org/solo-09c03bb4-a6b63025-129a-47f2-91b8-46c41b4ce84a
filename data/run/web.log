@@ -1,0 +1,28 @@
+INFO:     Started server process [2453]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:52498 - "GET /api/default-schema HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52502 - "GET /api/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52502 - "POST /api/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52502 - "POST /api/switches/writer HTTP/1.1" 409 Conflict
+INFO:     127.0.0.1:52502 - "GET /api/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52502 - "POST /api/switches/writer HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52502 - "GET /api/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52502 - "POST /api/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52502 - "POST /api/switches/reader HTTP/1.1" 409 Conflict
+INFO:     127.0.0.1:52502 - "POST /api/switches/reader HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52502 - "GET /api/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52502 - "POST /api/events/decode HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52502 - "POST /api/switches/reader HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52502 - "POST /api/reconcile HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52502 - "GET /api/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52502 - "POST /api/simulate HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52502 - "POST /api/switches/writer HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52502 - "POST /api/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52502 - "POST /api/reconcile HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52502 - "GET /api/status HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [2453]

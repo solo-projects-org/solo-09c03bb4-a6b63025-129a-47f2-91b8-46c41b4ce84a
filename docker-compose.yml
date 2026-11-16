@@ -1,0 +1,55 @@
+services:
+  analyzer-a:
+    build: .
+    command: ["analyzer-a"]
+    environment:
+      ANALYZER_ID: analyzer-a
+      ANALYZER_DB: /data/analyzer-a.db
+    ports:
+      - "8001:8001"
+    volumes:
+      - analyzer_a_data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  analyzer-b:
+    build: .
+    command: ["analyzer-b"]
+    environment:
+      ANALYZER_ID: analyzer-b
+      ANALYZER_DB: /data/analyzer-b.db
+    ports:
+      - "8002:8002"
+    volumes:
+      - analyzer_b_data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8002/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  webapp:
+    build: .
+    command: ["webapp"]
+    environment:
+      WEBAPP_DB: /data/webapp.db
+      ANALYZER_A_URL: http://analyzer-a:8001
+      ANALYZER_B_URL: http://analyzer-b:8002
+      RECONCILE_INTERVAL: "5"
+    ports:
+      - "8000:8000"
+    volumes:
+      - webapp_data:/data
+    depends_on:
+      analyzer-a:
+        condition: service_healthy
+      analyzer-b:
+        condition: service_healthy
+
+volumes:
+  analyzer_a_data:
+  analyzer_b_data:
+  webapp_data:

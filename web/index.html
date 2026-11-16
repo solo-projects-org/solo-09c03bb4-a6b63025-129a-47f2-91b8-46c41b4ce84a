@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Avro 仪器事件格式升级平台</title>
+<link rel="stylesheet" href="/static/style.css"/>
+</head>
+<body>
+<header>
+  <h1>Avro 仪器事件格式升级平台</h1>
+  <div class="sub">FastAPI + SQLite + Avro · 写入/读取格式兼容守卫 · 两阶段确认与重启对账</div>
+</header>
+
+<main>
+  <!-- ================= 实际生效状态 ================= -->
+  <section class="card">
+    <h2>① 实际生效格式</h2>
+    <div class="grid3">
+      <div>
+        <h3>当前写入格式（仓库）</h3>
+        <div id="writer-state" class="state">加载中…</div>
+      </div>
+      <div>
+        <h3>分析服务 A 读取格式</h3>
+        <div id="reader-a" class="state">加载中…</div>
+      </div>
+      <div>
+        <h3>分析服务 B 读取格式</h3>
+        <div id="reader-b" class="state">加载中…</div>
+      </div>
+    </div>
+    <h3>历史写入格式版本</h3>
+    <div id="schema-history"></div>
+  </section>
+
+  <!-- ================= 待确认切换 ================= -->
+  <section class="card">
+    <h2>② 切换状态（待确认 / 已确认 / 被拒绝）</h2>
+    <div class="grid2">
+      <div>
+        <h3>写入格式切换</h3>
+        <div id="writer-switches"></div>
+      </div>
+      <div>
+        <h3>读取格式切换</h3>
+        <div id="reader-switches"></div>
+      </div>
+    </div>
+    <button id="btn-reconcile" class="primary">立即核实并继续（对账）</button>
+    <span id="reconcile-msg" class="inline-msg"></span>
+    <div class="hint">后台每 5 秒自动对账一次；重启后也会自动核实所有未确认切换。</div>
+  </section>
+
+  <!-- ================= 事件入仓 ================= -->
+  <section class="card">
+    <h2>③ 事件入仓（按当前写入格式 Avro 编码留存）</h2>
+    <div class="grid2">
+      <div>
+        <label>样品号 sample_id</label>
+        <input id="ev-sample" value="S-2026-0001"/>
+        <label>项目 project</label>
+        <input id="ev-project" value="重金属普查"/>
+        <label>测值 measurement</label>
+        <input id="ev-measurement" value="3.14"/>
+        <label>提交后实际解码（可选，多选）</label>
+        <div class="checkbox-row">
+          <label><input type="checkbox" id="ev-dec-a"/> 分析服务 A</label>
+          <label><input type="checkbox" id="ev-dec-b"/> 分析服务 B</label>
+        </div>
+        <button id="btn-ingest-simple" class="primary">提交事件</button>
+      </div>
+      <div>
+        <label>或直接提交完整 Avro record JSON（优先于左栏）</label>
+        <textarea id="ev-payload" rows="8" placeholder='{"sample_id":"S-1","project":"P","measurement":1.0}'></textarea>
+        <button id="btn-ingest-json">按 JSON 提交</button>
+      </div>
+    </div>
+    <div id="ingest-msg"></div>
+  </section>
+
+  <!-- ================= 格式切换 ================= -->
+  <section class="card">
+    <h2>④ 格式升级</h2>
+    <div class="grid2">
+      <div>
+        <h3>切换写入格式</h3>
+        <p class="hint">须同时兼容 A、B 已生效的读取格式，否则给出字段路径并拒绝切换。</p>
+        <textarea id="writer-schema" rows="12"></textarea>
+        <button id="btn-writer-switch" class="primary">提交写入格式切换</button>
+      </div>
+      <div>
+        <h3>切换某服务读取格式</h3>
+        <p class="hint">须能读当前写入格式及全部留存事件的原格式，否则说明字段路径且不改格式。</p>
+        <label>目标分析服务</label>
+        <select id="reader-target">
+          <option value="analyzer-a">analyzer-a</option>
+          <option value="analyzer-b">analyzer-b</option>
+        </select>
+        <textarea id="reader-schema" rows="10"></textarea>
+        <button id="btn-reader-switch" class="primary">提交读取格式切换</button>
+      </div>
+    </div>
+    <div id="switch-msg"></div>
+  </section>
+
+  <!-- ================= 留存事件与解码 ================= -->
+  <section class="card">
+    <h2>⑤ 留存事件与解码结果</h2>
+    <h3>仓内事件（含写入时格式版本）</h3>
+    <table id="events-table">
+      <thead><tr><th>事件 ID</th><th>写入版本</th><th>载荷 JSON</th><th>入仓时间</th><th>操作</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <h3>最近解码结果</h3>
+    <table id="decodes-table">
+      <thead><tr><th>时间</th><th>事件</th><th>服务</th><th>读取版本</th><th>结果</th><th>数据 / 错误</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <!-- ================= 故障注入 ================= -->
+  <section class="card fault">
+    <h2>⑥ 故障注入（模拟延迟 / 丢回执）</h2>
+    <div class="grid2">
+      <div>
+        <label>全局网络延迟（毫秒，作用于分析服务）</label>
+        <input id="sim-delay" type="number" value="0" min="0"/>
+        <div class="checkbox-row">
+          <label><input type="checkbox" id="sim-drop-writer"/> 下一次写入切换丢回执（网页侧）</label>
+          <label><input type="checkbox" id="sim-drop-reader"/> 下一次读取切换丢回执（网页侧）</label>
+        </div>
+      </div>
+      <div>
+        <label>分析服务侧故障目标</label>
+        <select id="sim-analyzer">
+          <option value="">全部分析服务</option>
+          <option value="analyzer-a">analyzer-a</option>
+          <option value="analyzer-b">analyzer-b</option>
+        </select>
+        <div class="checkbox-row">
+          <label><input type="checkbox" id="sim-drop-sw"/> 下一次切换响应丢失（分析服务侧）</label>
+          <label><input type="checkbox" id="sim-drop-dec"/> 下一次解码响应丢失（分析服务侧）</label>
+        </div>
+      </div>
+    </div>
+    <button id="btn-sim" class="warn">应用故障注入</button>
+    <span id="sim-msg" class="inline-msg"></span>
+    <div class="hint">“丢回执”为一次性开关：仅下一次调用丢失；未确认前状态保持 pending，可重启或点对账核实。</div>
+  </section>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
